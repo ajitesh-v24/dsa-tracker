@@ -422,7 +422,7 @@
 <nav class="navbar">
   <div class="logo">
     <div class="logo-icon">⚡</div>
-    <div class="logo-text">Ajitesh's <span>DSA Tracker</span></div>
+    <div class="logo-text">DSA <span>Tracker</span></div>
   </div>
   <div class="nav-right">
     <div class="user-badge" id="userBadge">
@@ -565,7 +565,7 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script>
+<script type="module">
 // ═══════════════════════════════════════════════════
 //  DATA — All 183 problems from your Excel sheet
 // ═══════════════════════════════════════════════════
@@ -771,28 +771,62 @@ const DSA_DATA = [
 ];
 
 // ═══════════════════════════════════════════════════
+//  FIREBASE SETUP
+// ═══════════════════════════════════════════════════
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut as fbSignOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDMFxrys-Fya5505c0zwyshnRfjdoyNKGI",
+  authDomain: "dsavault-ajitesh.firebaseapp.com",
+  projectId: "dsavault-ajitesh",
+  storageBucket: "dsavault-ajitesh.firebasestorage.app",
+  messagingSenderId: "47888601117",
+  appId: "1:47888601117:web:ca679ae72ca29872e9f6f4"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// ═══════════════════════════════════════════════════
 //  STATE & STORAGE
 // ═══════════════════════════════════════════════════
 let currentUser = null;
 let allExpanded = false;
-
-function getStorageKey() {
-  return currentUser ? `dsa_progress_${currentUser.email}` : 'dsa_progress_guest';
-}
+let _cloudProgress = {};
 
 function loadProgress() {
-  try { return JSON.parse(localStorage.getItem(getStorageKey()) || '{}'); } catch { return {}; }
+  if (currentUser) return _cloudProgress;
+  try { return JSON.parse(localStorage.getItem('dsa_progress_guest') || '{}'); } catch { return {}; }
 }
 
-function saveProgress(progress) {
-  localStorage.setItem(getStorageKey(), JSON.stringify(progress));
+async function saveProgress(progress) {
+  if (currentUser) {
+    _cloudProgress = progress;
+    try {
+      await setDoc(doc(db, 'progress', currentUser.uid), { data: JSON.stringify(progress) });
+    } catch(e) { console.error('Save error', e); }
+  } else {
+    localStorage.setItem('dsa_progress_guest', JSON.stringify(progress));
+  }
 }
 
-function getUsers() {
-  try { return JSON.parse(localStorage.getItem('dsa_users') || '{}'); } catch { return {}; }
+async function loadCloudProgress() {
+  if (!currentUser) return;
+  try {
+    const snap = await getDoc(doc(db, 'progress', currentUser.uid));
+    if (snap.exists()) {
+      _cloudProgress = JSON.parse(snap.data().data || '{}');
+    } else {
+      // Migrate guest progress to cloud on first login
+      const guest = localStorage.getItem('dsa_progress_guest');
+      _cloudProgress = guest ? JSON.parse(guest) : {};
+      await setDoc(doc(db, 'progress', currentUser.uid), { data: JSON.stringify(_cloudProgress) });
+    }
+  } catch(e) { _cloudProgress = {}; }
 }
-
-function saveUsers(u) { localStorage.setItem('dsa_users', JSON.stringify(u)); }
 
 // ═══════════════════════════════════════════════════
 //  AUTH
@@ -816,47 +850,47 @@ function switchTab(tab) {
   document.getElementById('modalSuccess').textContent = '';
 }
 
-function signIn() {
-  const email = document.getElementById('siEmail').value.trim().toLowerCase();
+async function signIn() {
+  const email = document.getElementById('siEmail').value.trim();
   const pass = document.getElementById('siPass').value;
   const err = document.getElementById('modalError');
   if (!email || !pass) { err.textContent = 'Please fill in all fields.'; return; }
-  const users = getUsers();
-  if (!users[email] || users[email].password !== btoa(pass)) { err.textContent = 'Invalid email or password.'; return; }
-  currentUser = { email, name: users[email].name };
-  onLogin();
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+    // onAuthStateChanged handles the rest
+  } catch(e) {
+    if (e.code === 'auth/invalid-credential' || e.code === 'auth/wrong-password' || e.code === 'auth/user-not-found') {
+      err.textContent = 'Invalid email or password.';
+    } else {
+      err.textContent = e.message;
+    }
+  }
 }
 
-function signUp() {
+async function signUp() {
   const name = document.getElementById('suName').value.trim();
-  const email = document.getElementById('suEmail').value.trim().toLowerCase();
+  const email = document.getElementById('suEmail').value.trim();
   const pass = document.getElementById('suPass').value;
   const err = document.getElementById('modalError');
   const suc = document.getElementById('modalSuccess');
   if (!name || !email || !pass) { err.textContent = 'Please fill in all fields.'; return; }
   if (pass.length < 6) { err.textContent = 'Password must be at least 6 characters.'; return; }
-  if (!/\S+@\S+\.\S+/.test(email)) { err.textContent = 'Please enter a valid email.'; return; }
-  const users = getUsers();
-  if (users[email]) { err.textContent = 'An account with this email already exists.'; return; }
-  // Migrate guest progress if any
-  const guestProgress = localStorage.getItem('dsa_progress_guest');
-  users[email] = { name, password: btoa(pass) };
-  saveUsers(users);
-  currentUser = { email, name };
-  if (guestProgress) localStorage.setItem(`dsa_progress_${email}`, guestProgress);
-  suc.textContent = 'Account created! Welcome, ' + name + '!';
-  setTimeout(() => { onLogin(); }, 800);
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    await updateProfile(cred.user, { displayName: name });
+    suc.textContent = 'Account created! Welcome, ' + name + '!';
+    // onAuthStateChanged handles the rest
+  } catch(e) {
+    if (e.code === 'auth/email-already-in-use') {
+      err.textContent = 'An account with this email already exists.';
+    } else {
+      err.textContent = e.message;
+    }
+  }
 }
 
-function signOut() {
-  currentUser = null;
-  document.getElementById('userBadge').classList.remove('visible');
-  document.getElementById('signInBtn').style.display = '';
-  document.getElementById('signUpBtn').style.display = '';
-  document.getElementById('signOutBtn').style.display = 'none';
-  document.getElementById('guestBanner').classList.remove('hidden');
-  showToast('Signed out successfully', 'success');
-  renderAll();
+async function signOut() {
+  await fbSignOut(auth);
 }
 
 function onLogin() {
@@ -868,6 +902,18 @@ function onLogin() {
   document.getElementById('signOutBtn').style.display = '';
   document.getElementById('guestBanner').classList.add('hidden');
   showToast('Welcome back, ' + (currentUser.name || currentUser.email) + '! 👋', 'success');
+  renderAll();
+}
+
+function onLogout() {
+  currentUser = null;
+  _cloudProgress = {};
+  document.getElementById('userBadge').classList.remove('visible');
+  document.getElementById('signInBtn').style.display = '';
+  document.getElementById('signUpBtn').style.display = '';
+  document.getElementById('signOutBtn').style.display = 'none';
+  document.getElementById('guestBanner').classList.remove('hidden');
+  showToast('Signed out successfully', 'success');
   renderAll();
 }
 
@@ -985,12 +1031,12 @@ function renderQuestion(q, patternId, progress) {
   </div>`;
 }
 
-function toggleQ(patternId, qName, el) {
+async function toggleQ(patternId, qName, el) {
   const progress = loadProgress();
   const key = patternId + '_' + qName;
   progress[key] = !progress[key];
   if (!progress[key]) delete progress[key];
-  saveProgress(progress);
+  await saveProgress(progress);
   el.classList.toggle('checked');
   const row = el.closest('.question-row');
   row.querySelector('.q-name').classList.toggle('done', !!progress[key]);
@@ -1124,7 +1170,7 @@ function closeConfirm() {
   _pendingDelete = null;
   document.getElementById('confirmOverlay').classList.remove('open');
 }
-function confirmDelete() {
+async function confirmDelete() {
   if (!_pendingDelete) return;
   if (_pendingDelete.type === 'question') {
     const { patternId, qName } = _pendingDelete;
@@ -1133,7 +1179,7 @@ function confirmDelete() {
     if (idx !== -1) pattern.questions.splice(idx, 1);
     const progress = loadProgress();
     delete progress[patternId+'_'+qName];
-    saveProgress(progress);
+    await saveProgress(progress);
     closeConfirm();
     showToast('Problem deleted.', 'success');
     const wasOpen = document.getElementById('pc_'+patternId)?.classList.contains('open');
@@ -1189,7 +1235,7 @@ function closeRename() {
   document.getElementById('renameInput').style.display = '';
   document.getElementById('renameLinkInput').style.display = 'none';
 }
-function saveRename() {
+async function saveRename() {
   if (!_pendingRename) return;
   const { type, patternId, qName } = _pendingRename;
 
@@ -1213,7 +1259,7 @@ function saveRename() {
     const progress = loadProgress();
     const oldKey = patternId+'_'+qName;
     const newKey = patternId+'_'+newName;
-    if (progress[oldKey]) { progress[newKey] = progress[oldKey]; delete progress[oldKey]; saveProgress(progress); }
+    if (progress[oldKey]) { progress[newKey] = progress[oldKey]; delete progress[oldKey]; await saveProgress(progress); }
     q.name = newName;
     closeRename();
     showToast('Problem renamed!', 'success');
@@ -1294,36 +1340,45 @@ document.getElementById('modalOverlay').addEventListener('click', function(e) {
 document.addEventListener('keydown', e => { if (e.key==='Escape') { closeModal(); closeConfirm(); closeRename(); } });
 document.addEventListener('keydown', e => { if (e.key==='Enter' && _addPatternOpen) addNewPattern(); });
 
-// Check if user was previously logged in
-try {
-  const saved = JSON.parse(localStorage.getItem('dsa_session'));
-  if (saved && saved.email) {
-    const users = getUsers();
-    if (users[saved.email]) {
-      currentUser = { email: saved.email, name: users[saved.email].name };
-      document.getElementById('userBadge').classList.add('visible');
-      document.getElementById('userEmail').textContent = currentUser.name || currentUser.email;
-      document.getElementById('signInBtn').style.display = 'none';
-      document.getElementById('signUpBtn').style.display = 'none';
-      document.getElementById('signOutBtn').style.display = '';
-      document.getElementById('guestBanner').classList.add('hidden');
-    }
+// Firebase auth state listener — fires on login/logout/page load
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    currentUser = { uid: user.uid, email: user.email, name: user.displayName || user.email };
+    await loadCloudProgress();
+    onLogin();
+  } else {
+    onLogout();
   }
-} catch(e){}
+});
 
-// Override onLogin to also save session
-const _onLogin = onLogin;
-window.onLogin = function() {
-  localStorage.setItem('dsa_session', JSON.stringify({email: currentUser.email}));
-  _onLogin();
-}
-
-// Override signOut to clear session
-const _signOut = signOut;
-window.signOut = function() {
-  localStorage.removeItem('dsa_session');
-  _signOut();
-}
+// ═══════════════════════════════════════════════════
+//  EXPOSE FUNCTIONS TO GLOBAL SCOPE (needed for onclick in HTML)
+// ═══════════════════════════════════════════════════
+window.openModal = openModal;
+window.closeModal = closeModal;
+window.switchTab = switchTab;
+window.signIn = signIn;
+window.signUp = signUp;
+window.signOut = signOut;
+window.toggleAll = toggleAll;
+window.togglePattern = togglePattern;
+window.toggleCtxMenu = toggleCtxMenu;
+window.closeAllMenus = closeAllMenus;
+window.toggleCheck = toggleCheck;
+window.changeDiff = changeDiff;
+window.deleteQuestion = deleteQuestion;
+window.deletePattern = deletePattern;
+window.openRenamePattern = openRenamePattern;
+window.openRenameQuestion = openRenameQuestion;
+window.openChangeLink = openChangeLink;
+window.closeRename = closeRename;
+window.saveRename = saveRename;
+window.closeConfirm = closeConfirm;
+window.confirmDelete = confirmDelete;
+window.toggleAddPatternForm = toggleAddPatternForm;
+window.addNewPattern = addNewPattern;
+window.addQuestion = addQuestion;
+window.showToast = showToast;
 
 renderAll();
 </script>
