@@ -245,7 +245,7 @@ async function saveProgress(progress) {
   }
 }
 
-// Save entire DSA_DATA (custom patterns/questions) to Firestore or localStorage
+// Save entire DSA_DATA to Firestore or localStorage — ONLY called on explicit user action
 async function saveData() {
   const serialized = JSON.stringify(DSA_DATA);
   if (currentUser) {
@@ -257,44 +257,32 @@ async function saveData() {
   }
 }
 
-async function loadData() {
-  let saved = null;
-  if (currentUser) {
-    try {
-      const snap = await getDoc(doc(db, 'progress', currentUser.uid));
-      if (snap.exists() && snap.data().dsaData) {
-        saved = JSON.parse(snap.data().dsaData);
-      }
-    } catch(e) { console.error('Load data error', e); }
-  } else {
-    const s = localStorage.getItem('dsa_data_guest');
-    if (s) saved = JSON.parse(s);
-  }
-  if (saved && saved.length > 0) {
-    DSA_DATA.length = 0;
-    saved.forEach(p => DSA_DATA.push(p));
-  } else if (currentUser) {
-    // First time login — no saved data yet, save the default DSA_DATA to cloud
-    await saveData();
-  }
-}
-
 async function loadCloudProgress() {
   if (!currentUser) return;
   try {
     const snap = await getDoc(doc(db, 'progress', currentUser.uid));
     if (snap.exists()) {
+      // Load solved checkboxes
       _cloudProgress = JSON.parse(snap.data().data || '{}');
-      // Also load DSA data from same snapshot to avoid double read
+
       if (snap.data().dsaData) {
+        // ✅ Firestore has saved data — always use it as source of truth
         const saved = JSON.parse(snap.data().dsaData);
         if (saved && saved.length > 0) {
           DSA_DATA.length = 0;
           saved.forEach(p => DSA_DATA.push(p));
+          // Silently merge any brand-new default problems from code updates
+          // This adds new problems without ever removing user additions
+          _mergeNewDefaultsOnly();
         }
+      } else {
+        // dsaData field is missing — first time this user's doc was created
+        // Save defaults to cloud WITHOUT overwriting progress
+        await setDoc(doc(db, 'progress', currentUser.uid),
+          { dsaData: JSON.stringify(DSA_DATA) }, { merge: true });
       }
     } else {
-      // Brand new user — migrate guest progress and save default data
+      // Brand new user — save everything fresh
       const guest = localStorage.getItem('dsa_progress_guest');
       _cloudProgress = guest ? JSON.parse(guest) : {};
       await setDoc(doc(db, 'progress', currentUser.uid), {
@@ -302,7 +290,34 @@ async function loadCloudProgress() {
         dsaData: JSON.stringify(DSA_DATA)
       });
     }
-  } catch(e) { _cloudProgress = {}; }
+  } catch(e) { console.error('loadCloudProgress error', e); _cloudProgress = {}; }
+}
+
+// Snapshot of default problems at load time — used for merge only
+const _DEFAULT_IDS = new Set(DSA_DATA.map(p => p.id));
+const _DEFAULT_Q_MAP = {};
+DSA_DATA.forEach(p => {
+  _DEFAULT_Q_MAP[p.id] = new Set(p.questions.map(q => q.name));
+});
+const _DEFAULT_DATA = JSON.parse(JSON.stringify(DSA_DATA)); // deep copy
+
+// Only add NEW problems/patterns from code updates — never remove user data
+function _mergeNewDefaultsOnly() {
+  _DEFAULT_DATA.forEach(defaultPattern => {
+    const savedPattern = DSA_DATA.find(p => p.id === defaultPattern.id);
+    if (!savedPattern) {
+      // New pattern added in a code update — add it
+      DSA_DATA.push(JSON.parse(JSON.stringify(defaultPattern)));
+    } else {
+      // Pattern exists — add only new questions from defaults
+      defaultPattern.questions.forEach(defaultQ => {
+        const exists = savedPattern.questions.find(q => q.name === defaultQ.name);
+        if (!exists) {
+          savedPattern.questions.push(JSON.parse(JSON.stringify(defaultQ)));
+        }
+      });
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════
@@ -863,10 +878,21 @@ document.addEventListener('keydown', e => { if (e.key==='Enter' && _addPatternOp
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     currentUser = { uid: user.uid, email: user.email, name: user.displayName || user.email };
-    await loadCloudProgress(); // this now also loads DSA_DATA in one read
+    await loadCloudProgress(); // loads both progress and DSA_DATA from Firestore
     onLogin();
   } else {
-    await loadData(); // load guest data from localStorage
+    // Guest mode — load from localStorage
+    const s = localStorage.getItem('dsa_data_guest');
+    if (s) {
+      try {
+        const saved = JSON.parse(s);
+        if (saved && saved.length > 0) {
+          DSA_DATA.length = 0;
+          saved.forEach(p => DSA_DATA.push(p));
+          _mergeNewDefaultsOnly();
+        }
+      } catch(e) {}
+    }
     onLogout();
   }
 });
