@@ -238,7 +238,7 @@ async function saveProgress(progress) {
   if (currentUser) {
     _cloudProgress = progress;
     try {
-      await setDoc(doc(db, 'progress', currentUser.uid), { data: JSON.stringify(progress) });
+      await setDoc(doc(db, 'progress', currentUser.uid), { data: JSON.stringify(progress) }, { merge: true });
     } catch(e) { console.error('Save error', e); }
   } else {
     localStorage.setItem('dsa_progress_guest', JSON.stringify(progress));
@@ -254,6 +254,22 @@ async function saveData() {
     } catch(e) { console.error('Save data error', e); }
   } else {
     localStorage.setItem('dsa_data_guest', serialized);
+  }
+}
+
+// Save both progress (checkboxes) and DSA_DATA in a single Firestore write
+async function saveProgressAndData(progress) {
+  if (currentUser) {
+    _cloudProgress = progress;
+    try {
+      await setDoc(doc(db, 'progress', currentUser.uid), {
+        data: JSON.stringify(progress),
+        dsaData: JSON.stringify(DSA_DATA)
+      }, { merge: true });
+    } catch(e) { console.error('saveProgressAndData error', e); }
+  } else {
+    localStorage.setItem('dsa_progress_guest', JSON.stringify(progress));
+    localStorage.setItem('dsa_data_guest', JSON.stringify(DSA_DATA));
   }
 }
 
@@ -688,13 +704,13 @@ async function confirmDelete() {
     if (idx !== -1) pattern.questions.splice(idx, 1);
     const progress = loadProgress();
     delete progress[patternId+'_'+qName];
-    await saveProgress(progress);
-    await saveData();
+    // Save both progress and DSA_DATA in one atomic write
+    await saveProgressAndData(progress);
     closeConfirm();
     showToast('Problem deleted.', 'success');
     const wasOpen = document.getElementById('pc_'+patternId)?.classList.contains('open');
     renderAll();
-  initDragDrop();
+    initDragDrop();
     if (wasOpen) setTimeout(()=>{ const c=document.getElementById('pc_'+patternId); if(c) c.classList.add('open'); },50);
   } else {
     const { patternId } = _pendingDelete;
@@ -704,7 +720,7 @@ async function confirmDelete() {
     closeConfirm();
     showToast('Pattern deleted.', 'success');
     renderAll();
-  initDragDrop();
+    initDragDrop();
   }
 }
 
