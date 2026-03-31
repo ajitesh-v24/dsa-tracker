@@ -287,8 +287,11 @@ async function loadCloudProgress() {
         if (saved && saved.length > 0) {
           DSA_DATA.length = 0;
           saved.forEach(p => DSA_DATA.push(p));
+          // Load deleted defaults list before merging
+          if (snap.data().deletedDefaults) {
+            _deletedDefaults = new Set(JSON.parse(snap.data().deletedDefaults));
+          }
           // Silently merge any brand-new default problems from code updates
-          // This adds new problems without ever removing user additions
           _mergeNewDefaultsOnly();
         }
       } else {
@@ -317,16 +320,53 @@ DSA_DATA.forEach(p => {
 });
 const _DEFAULT_DATA = JSON.parse(JSON.stringify(DSA_DATA)); // deep copy
 
+// Track deliberately deleted default items so merge never re-adds them
+// Format: Set of strings like "patternId_questionName" or "patternId" for whole patterns
+let _deletedDefaults = new Set();
+
+async function _loadDeletedDefaults() {
+  if (currentUser) {
+    try {
+      const snap = await getDoc(doc(db, 'progress', currentUser.uid));
+      if (snap.exists() && snap.data().deletedDefaults) {
+        _deletedDefaults = new Set(JSON.parse(snap.data().deletedDefaults));
+      }
+    } catch(e) {}
+  } else {
+    try {
+      const s = localStorage.getItem('dsa_deleted_defaults');
+      if (s) _deletedDefaults = new Set(JSON.parse(s));
+    } catch(e) {}
+  }
+}
+
+async function _saveDeletedDefaults() {
+  const arr = JSON.stringify([..._deletedDefaults]);
+  if (currentUser) {
+    try {
+      await setDoc(doc(db, 'progress', currentUser.uid), { deletedDefaults: arr }, { merge: true });
+    } catch(e) {}
+  } else {
+    localStorage.setItem('dsa_deleted_defaults', arr);
+  }
+}
+
 // Only add NEW problems/patterns from code updates — never remove user data
+// and never re-add items the user deliberately deleted
 function _mergeNewDefaultsOnly() {
   _DEFAULT_DATA.forEach(defaultPattern => {
+    // Skip if user deleted this entire pattern
+    if (_deletedDefaults.has('p_' + defaultPattern.id)) return;
+
     const savedPattern = DSA_DATA.find(p => p.id === defaultPattern.id);
     if (!savedPattern) {
-      // New pattern added in a code update — add it
+      // Only add if it's truly new (not user-deleted)
       DSA_DATA.push(JSON.parse(JSON.stringify(defaultPattern)));
     } else {
-      // Pattern exists — add only new questions from defaults
+      // Add only new questions that user hasn't deleted
       defaultPattern.questions.forEach(defaultQ => {
+        const key = defaultPattern.id + '_' + defaultQ.name;
+        if (_deletedDefaults.has(key)) return; // user deleted this — skip
         const exists = savedPattern.questions.find(q => q.name === defaultQ.name);
         if (!exists) {
           savedPattern.questions.push(JSON.parse(JSON.stringify(defaultQ)));
@@ -702,9 +742,15 @@ async function confirmDelete() {
     const pattern = DSA_DATA.find(p=>p.id===patternId);
     const idx = pattern.questions.findIndex(q=>q.name===qName);
     if (idx !== -1) pattern.questions.splice(idx, 1);
+    // If this was a default question, record it so merge never re-adds it
+    const isDefault = _DEFAULT_DATA.find(p => p.id === patternId)
+      ?.questions.find(q => q.name === qName);
+    if (isDefault) {
+      _deletedDefaults.add(patternId + '_' + qName);
+      await _saveDeletedDefaults();
+    }
     const progress = loadProgress();
     delete progress[patternId+'_'+qName];
-    // Save both progress and DSA_DATA in one atomic write
     await saveProgressAndData(progress);
     closeConfirm();
     showToast('Problem deleted.', 'success');
@@ -716,6 +762,12 @@ async function confirmDelete() {
     const { patternId } = _pendingDelete;
     const idx = DSA_DATA.findIndex(p=>p.id===patternId);
     if (idx !== -1) DSA_DATA.splice(idx, 1);
+    // If this was a default pattern, record it
+    const isDefault = _DEFAULT_DATA.find(p => p.id === patternId);
+    if (isDefault) {
+      _deletedDefaults.add('p_' + patternId);
+      await _saveDeletedDefaults();
+    }
     await saveData();
     closeConfirm();
     showToast('Pattern deleted.', 'success');
@@ -897,7 +949,11 @@ onAuthStateChanged(auth, async (user) => {
     await loadCloudProgress(); // loads both progress and DSA_DATA from Firestore
     onLogin();
   } else {
-    // Guest mode — load from localStorage
+    // Guest mode — load deleted defaults first, then data
+    try {
+      const d = localStorage.getItem('dsa_deleted_defaults');
+      if (d) _deletedDefaults = new Set(JSON.parse(d));
+    } catch(e) {}
     const s = localStorage.getItem('dsa_data_guest');
     if (s) {
       try {
